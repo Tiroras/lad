@@ -1,0 +1,14 @@
+{
+  "cli": { "version": ">= 16.0.0", "appVersionSource": "local" },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
+    },
+    "demo": {
+      "extends": "preview",
+      "env": { "EXPO_PUBLIC_ENABLE_DEMO": "true" }
+    },
+    "production": { "autoIncrement": true }
+  }
+}

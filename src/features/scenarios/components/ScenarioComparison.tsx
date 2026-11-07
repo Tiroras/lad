@@ -1,0 +1,93 @@
+import { useMemo, useState } from "react";
+import { View } from "react-native";
+import { forecast } from "../../../domain/forecast";
+import { scenarioWarnings } from "../../../domain/scenarios";
+import type { SavedScenario } from "../../../domain/types";
+import { useMoney, useFinance } from "../../../state/finance";
+import { Chip, Notice, Row, Txt } from "../../../shared/ui";
+import { ForecastResultView } from "../../forecast";
+
+export function ScenarioComparison({ scenario }: { scenario: SavedScenario }) {
+  const { money } = useMoney();
+  const { state, today } = useFinance();
+  const [compareId, setCompareId] = useState("base");
+  const other = state.scenarios?.find(
+    (s) => s.id === compareId && s.id !== scenario.id,
+  );
+  const calculated = useMemo(() => {
+    try {
+      return {
+        result: forecast(state, scenario.horizon, today, undefined, scenario),
+        baseline: forecast(state, scenario.horizon, today, undefined, other),
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Не удалось рассчитать сценарий. Проверьте суммы и даты.",
+      };
+    }
+  }, [state, scenario, today, other]);
+  if ("error" in calculated)
+    return <Notice tone="warning">{calculated.error}</Notice>;
+  const { result, baseline } = calculated;
+  const warnings = [
+    ...scenarioWarnings(state, scenario, today),
+    ...(other
+      ? scenarioWarnings(state, other, today).map((w) => `${other.name}: ${w}`)
+      : []),
+  ];
+  const delta = result.closingAvailable - baseline.closingAvailable;
+  const outside = scenario.events.filter(
+    (e) => e.enabled !== false && e.date > result.days.at(-1)!.date,
+  );
+  return (
+    <View style={{ gap: 18 }}>
+      <Txt>Сравнить с</Txt>
+      <Row style={{ flexWrap: "wrap" }}>
+        <Chip
+          label="Текущий план"
+          active={!other}
+          onPress={() => setCompareId("base")}
+        />
+        {(state.scenarios ?? [])
+          .filter((s) => s.id !== scenario.id)
+          .map((s) => (
+            <Chip
+              key={s.id}
+              label={s.name}
+              active={s.id === other?.id}
+              onPress={() => setCompareId(s.id)}
+            />
+          ))}
+      </Row>
+      {warnings.map((warning, i) => (
+        <Notice key={i}>{warning}</Notice>
+      ))}
+      {outside.length > 0 && (
+        <Notice>
+          За пределами периода: {outside.map((e) => e.name).join(", ")}. Эти
+          события пока не влияют на результат.
+        </Notice>
+      )}
+      <Txt testID="scenario-delta">
+        Разница к концу периода: {delta > 0 ? "+" : ""}
+        {money(delta, true)}.
+      </Txt>
+      <ForecastResultView
+        result={result}
+        baseline={baseline}
+        labels={{
+          result: scenario.name,
+          baseline: other?.name ?? "Текущий план",
+        }}
+      />
+      <Notice>
+        Оба варианта рассчитаны от сегодняшних остатков на одинаковое число
+        дней. Фактические операции и основной план не меняются. По мере
+        изменения учёта сценарий пересчитывается заново.
+      </Notice>
+    </View>
+  );
+}

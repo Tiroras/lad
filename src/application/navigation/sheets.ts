@@ -1,0 +1,81 @@
+import type { SheetName, SheetState } from "./types";
+
+export type SheetNavigation = {
+  current: SheetState | null;
+  parents: SheetState[];
+};
+
+const settingsSections: SheetName[] = [
+  "profiles",
+  "guide",
+  "profileSettings",
+  "reminderSettings",
+  "securitySettings",
+  "dataSettings",
+  "about",
+];
+
+const sameSheet = (a: SheetState, b: SheetState) => {
+  const entries = Object.entries(a);
+  return (
+    entries.length === Object.keys(b).length &&
+    entries.every(([key, value]) => b[key as keyof SheetState] === value)
+  );
+};
+
+export function openSheet(
+  navigation: SheetNavigation,
+  next: SheetState,
+): SheetNavigation {
+  const { current, parents } = navigation;
+  if (current && sameSheet(current, next)) return navigation;
+  const parentIndex = parents.findIndex((parent) => sameSheet(parent, next));
+  if (parentIndex >= 0)
+    return { current: next, parents: parents.slice(0, parentIndex) };
+  return {
+    current: next,
+    // Settings and learning retain their place when opening a child form.
+    parents:
+      current &&
+      (current.type === "settings" ||
+        current.type === "guide" ||
+        current.type === "list" ||
+        next.type === "list" ||
+        parents.length > 0)
+        ? [...parents, current]
+        : settingsSections.includes(next.type) &&
+            !(next.type === "guide" && next.journey)
+          ? [{ type: "settings" }]
+          : [],
+  };
+}
+
+function returnToAncestor(
+  navigation: SheetNavigation,
+  type: "guide" | "list",
+): SheetNavigation {
+  const index = navigation.parents.findLastIndex(
+    (parent) => parent.type === type,
+  );
+  return index < 0
+    ? navigation
+    : {
+        current: navigation.parents[index],
+        parents: navigation.parents.slice(0, index),
+      };
+}
+
+export function returnToLearning(navigation: SheetNavigation): SheetNavigation {
+  return returnToAncestor(navigation, "guide");
+}
+
+export function previousSheet(navigation: SheetNavigation): SheetNavigation {
+  return {
+    current: navigation.parents.at(-1) ?? null,
+    parents: navigation.parents.slice(0, -1),
+  };
+}
+
+export function returnToListPage(navigation: SheetNavigation): SheetNavigation {
+  return returnToAncestor(navigation, "list");
+}

@@ -1,0 +1,258 @@
+import { readState as read, startApp, pickDate, PROFILE_KEYS } from "./helpers";
+import { expect, test, type Page } from "@playwright/test";
+import { createInitialState } from "../../src/domain/seed";
+import { saveTransaction } from "../../src/domain/actions/transactions";
+import { accountBalance } from "../../src/domain/accountBalances";
+import { reconciliationCurrent } from "../../src/domain/reconciliation";
+import type { FinanceState } from "../../src/domain/types";
+
+const TODAY = "2026-09-10";
+const button = (page: Page, name: string) =>
+  page.getByRole("button", { name, exact: true });
+async function start(page: Page, state: FinanceState) {
+  state.settings.exchange = { automatic: false, rates: {} };
+  await startApp(page, TODAY, state);
+}
+async function openReconciliation(page: Page) {
+  await button(page, "Открыть мои счета").click();
+  await button(page, "Сверить: Основная карта").click();
+}
+
+test("four-step onboarding preserves demo and commits balances and future plans to the personal profile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  const demo = createInitialState(true, TODAY);
+  demo.settings.onboardingCompleted = false;
+  await start(page, demo);
+  await button(page, "Настроить свой учёт").click();
+  await button(page, "Настроить свой учёт").click();
+  await page.getByLabel("Ваше имя", { exact: true }).fill("Тест");
+  await page
+    .getByLabel("Название основного счёта", { exact: true })
+    .fill("Моя карта");
+  const balance = page.getByLabel("Начальный остаток", { exact: true });
+  const savings = page.getByLabel("Начальные накопления", { exact: true });
+  await expect(balance).toHaveValue("");
+  await expect(savings).toHaveValue("");
+  await savings.scrollIntoViewIfNeeded();
+  await page.clock.runFor(500);
+  await page.screenshot({
+    path: "test-results/onboarding-empty-320.png",
+    animations: "disabled",
+  });
+  await balance.pressSequentially("10000");
+  await savings.pressSequentially("2000");
+  await expect(balance).toHaveValue("10 000");
+  await expect(savings).toHaveValue("2 000");
+  await button(page, "Продолжить").click();
+  const income = page.getByLabel("Доход при настройке", { exact: true });
+  await expect(income).toHaveValue("");
+  await income.pressSequentially("5000");
+  await pickDate(page, "Дата первого дохода", "2026-09-15");
+  await button(page, "Продолжить").click();
+  const bill = page.getByLabel("Платёж при настройке", { exact: true });
+  await expect(bill).toHaveValue("");
+  await bill.pressSequentially("2500");
+  await pickDate(page, "Дата первого платежа", "2026-09-18");
+  await button(page, "Продолжить").click();
+  const buffer = page.getByLabel("Резерв при настройке", { exact: true });
+  await expect(buffer).toHaveValue("");
+  await buffer.pressSequentially("1000");
+  expect((await read(page)).demo).toBe(false);
+  expect((await read(page)).transactions).toEqual([]);
+  expect(
+    (await read(page)).accounts.every(
+      (account) => account.openingBalance === 0,
+    ),
+  ).toBe(true);
+  expect(await read(page, "demo")).toEqual(demo);
+  await page.screenshot({
+    path: "test-results/onboarding-confirmation-320.png",
+    fullPage: true,
+  });
+  await button(page, "Начать учёт с этими данными").click();
+  await expect.poll(async () => (await read(page)).demo).toBe(false);
+  const state = await read(page);
+  expect(state.transactions).toHaveLength(0);
+  expect(accountBalance(state, "card", TODAY)).toBe(1000000);
+  expect(accountBalance(state, "savings", TODAY)).toBe(200000);
+  expect(state.plannedIncomes).toHaveLength(1);
+  expect(state.recurring).toHaveLength(1);
+  expect(await read(page, "demo")).toEqual(demo);
+  await page.reload();
+  await expect(page.getByText("Тест, всё на виду.")).toBeVisible();
+  expect((await read(page)).settings.onboardingCompleted).toBe(true);
+  await expect(button(page, "Настроить свой учёт")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+});
+
+test("starting setup from demo opens an existing personal profile without replacing its records", async ({
+  page,
+}) => {
+  const demo = createInitialState(true, TODAY);
+  demo.settings.onboardingCompleted = false;
+  await start(page, demo);
+  const personal = saveTransaction(
+    createInitialState(false, TODAY),
+    {
+      type: "income",
+      title: "Сохранённый личный доход",
+      category: "other",
+      amount: 98765,
+      date: TODAY,
+      accountId: "card",
+    },
+    TODAY,
+  );
+  personal.settings.exchange = { automatic: false, rates: {} };
+  personal.settings.name = "Личный профиль";
+  await page.evaluate(
+    ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+    { key: PROFILE_KEYS.personal, value: personal },
+  );
+  await button(page, "Настроить свой учёт").click();
+  await button(page, "Настроить свой учёт").click();
+  await expect(page.getByText("Личный профиль, всё на виду.")).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await read(page)).toEqual(personal);
+  expect(await read(page, "demo")).toEqual(demo);
+  await page.reload();
+  await expect(page.getByText("Личный профиль, всё на виду.")).toBeVisible();
+  expect(await read(page)).toEqual(personal);
+});
+
+test("onboarding accepts untouched empty amounts as zero and skips optional plans", async ({
+  page,
+}) => {
+  const demo = createInitialState(true, TODAY);
+  demo.settings.onboardingCompleted = false;
+  await start(page, demo);
+  await button(page, "Настроить свой учёт").click();
+  await button(page, "Настроить свой учёт").click();
+  await expect(
+    page.getByLabel("Начальный остаток", { exact: true }),
+  ).toHaveValue("");
+  await expect(
+    page.getByLabel("Начальные накопления", { exact: true }),
+  ).toHaveValue("");
+  await button(page, "Продолжить").click();
+  await expect(
+    page.getByLabel("Доход при настройке", { exact: true }),
+  ).toHaveValue("");
+  await button(page, "Продолжить").click();
+  await expect(
+    page.getByLabel("Платёж при настройке", { exact: true }),
+  ).toHaveValue("");
+  await button(page, "Продолжить").click();
+  await expect(
+    page.getByLabel("Резерв при настройке", { exact: true }),
+  ).toHaveValue("");
+  await button(page, "Начать учёт с этими данными").click();
+  await expect.poll(async () => (await read(page)).demo).toBe(false);
+  const state = await read(page);
+  expect(state.accounts.every((account) => account.openingBalance === 0)).toBe(
+    true,
+  );
+  expect(state.settings.buffer).toBe(0);
+  expect(state.transactions).toHaveLength(0);
+  expect(state.plannedIncomes ?? []).toHaveLength(0);
+  expect(state.recurring).toHaveLength(0);
+  await page.reload();
+  expect((await read(page)).settings.onboardingCompleted).toBe(true);
+});
+
+test("bank reconciliation preserves dated correction and flags edited history after reload", async ({
+  page,
+}) => {
+  let state = createInitialState(false, TODAY);
+  state.accounts[0].openingBalance = 1000000;
+  state = saveTransaction(
+    state,
+    {
+      type: "expense",
+      title: "Покупка для сверки",
+      amount: 10000,
+      date: "2026-09-08",
+      category: "groceries",
+      accountId: "card",
+    },
+    TODAY,
+  );
+  await start(page, state);
+  await openReconciliation(page);
+  await page.getByLabel("Остаток по банку", { exact: true }).fill("9800");
+  await button(page, "Подтвердить сверку").click();
+  await expect(
+    page.getByText(/Сначала найдите расхождение или подтвердите корректировку/),
+  ).toBeVisible();
+  await button(page, "Записать разницу корректировкой").click();
+  await page
+    .getByLabel("Причина корректировки", { exact: true })
+    .fill("Сверено с банком");
+  await button(page, "Подтвердить сверку").click();
+  await expect
+    .poll(async () => (await read(page)).reconciliations?.length)
+    .toBe(1);
+  let saved = await read(page);
+  expect(saved.balanceAdjustments?.[0].amount).toBe(-10000);
+  expect(saved.transactions).toHaveLength(1);
+  expect(accountBalance(saved, "card", TODAY)).toBe(980000);
+  await button(page, "Закрыть").click();
+  await page
+    .getByRole("button", { name: /Покупка для сверки,.*открыть операцию/ })
+    .first()
+    .click();
+  await page.getByLabel("Сумма операции", { exact: true }).fill("120");
+  await button(page, "Сохранить изменения").click();
+  await expect
+    .poll(async () => (await read(page)).transactions[0].amount)
+    .toBe(12000);
+  saved = await read(page);
+  expect(reconciliationCurrent(saved, saved.reconciliations![0])).toBe(false);
+  await page.reload();
+  await expect(page.getByText("Больше ясности.")).toBeVisible();
+  await openReconciliation(page);
+  await expect(
+    page.getByText("История изменилась — нужна повторная сверка"),
+  ).toBeVisible();
+  await expect(page.getByText("Сверено с банком").first()).toBeVisible();
+  await page
+    .getByText("История изменилась — нужна повторная сверка")
+    .scrollIntoViewIfNeeded();
+  await page.clock.runFor(500);
+  await page.screenshot({
+    path: "test-results/reconciliation-history.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await button(page, "Подтвердить сверку").click();
+  await expect
+    .poll(async () => (await read(page)).reconciliations?.length)
+    .toBe(2);
+  saved = await read(page);
+  expect(saved.balanceAdjustments).toHaveLength(1);
+  expect(reconciliationCurrent(saved, saved.reconciliations!.at(-1)!)).toBe(
+    true,
+  );
+});
+
+test("plain income form stays usable without a selected refund purchase", async ({
+  page,
+}) => {
+  await start(page, createInitialState(false, TODAY));
+  await button(page, "Добавить операцию").click();
+  await page.getByRole("tab", { name: "Доход", exact: true }).click();
+  await page
+    .getByLabel("Название операции", { exact: true })
+    .fill("Подработка");
+  await page.getByLabel("Сумма операции", { exact: true }).fill("300");
+  await expect(button(page, "Это возврат за покупку")).toBeVisible();
+  await button(page, "Добавить операцию").click();
+  await expect.poll(async () => (await read(page)).transactions.length).toBe(1);
+  expect((await read(page)).transactions[0].refundOf).toBeUndefined();
+});
